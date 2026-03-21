@@ -78,14 +78,17 @@ public class KeycloakClientOperations {
                 // Load system CA certificates explicitly (ConnId classloader doesn't inherit them)
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
                 KeyStore trustStore = null;
-                // Try standard locations for CA bundle
-                for (String path : new String[]{
-                        System.getProperty("javax.net.ssl.trustStore"),
-                        System.getenv("JAVA_HOME") + "/lib/security/cacerts",
-                        "/etc/ssl/certs/java/cacerts",
-                        "/etc/pki/java/cacerts"
-                }) {
-                    if (path != null && Files.exists(Path.of(path))) {
+                String javaHome = System.getenv("JAVA_HOME");
+                List<String> candidates = new ArrayList<>();
+                candidates.add(System.getProperty("javax.net.ssl.trustStore"));
+                if (javaHome != null && !javaHome.isEmpty()) {
+                    candidates.add(javaHome + "/lib/security/cacerts");
+                }
+                candidates.add("/etc/ssl/certs/java/cacerts");
+                candidates.add("/etc/default/cacerts");
+                candidates.add("/etc/pki/java/cacerts");
+                for (String path : candidates) {
+                    if (path != null && !path.isEmpty() && Files.exists(Path.of(path))) {
                         trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
                         try (InputStream is = Files.newInputStream(Path.of(path))) {
                             trustStore.load(is, "changeit".toCharArray());
