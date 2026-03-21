@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>net.flowbridge.connector</groupId>
+    <artifactId>connector-keycloak-clients</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Keycloak Clients ConnId Connector</name>
+    <description>
+        MidPoint/ConnId connector for managing Keycloak OAuth clients (confidential clients
+        with service accounts). Designed for the Flowbridge Agent Identity Platform.
+        Manages client lifecycle, scopes, and service account credentials.
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <connid.version>1.5.2.0</connid.version>
+        <polygon.rest.version>1.5.2.0</polygon.rest.version>
+        <keycloak.version>26.1.0</keycloak.version>
+        <jackson.version>2.17.2</jackson.version>
+        <connectorPackage>net.flowbridge.connector.keycloak</connectorPackage>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>evolveum-nexus</id>
+            <url>https://nexus.evolveum.com/nexus/repository/releases/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- ConnId Framework -->
+        <dependency>
+            <groupId>net.tirasa.connid</groupId>
+            <artifactId>connector-framework</artifactId>
+            <version>${connid.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Evolveum REST Connector Superclass -->
+        <dependency>
+            <groupId>com.evolveum.polygon</groupId>
+            <artifactId>connector-rest</artifactId>
+            <version>${polygon.rest.version}</version>
+        </dependency>
+
+        <!-- Keycloak Admin Client -->
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-admin-client</artifactId>
+            <version>${keycloak.version}</version>
+        </dependency>
+
+        <!-- Jackson for JSON processing (used by keycloak-admin-client) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.testng</groupId>
+            <artifactId>testng</artifactId>
+            <version>7.10.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.7.1</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <ConnectorBundle-FrameworkVersion>${connid.version}</ConnectorBundle-FrameworkVersion>
+                            <ConnectorBundle-Name>${connectorPackage}</ConnectorBundle-Name>
+                            <ConnectorBundle-Version>${project.version}</ConnectorBundle-Version>
+                        </manifestEntries>
+                    </archive>
+                    <descriptorRefs>
+                        <descriptorRef>jar-with-dependencies</descriptorRef>
+                    </descriptorRefs>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>make-assembly</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.3.1</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
