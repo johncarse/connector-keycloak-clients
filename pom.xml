@@ -22,7 +22,6 @@
         <maven.compiler.target>21</maven.compiler.target>
         <connid.version>1.5.2.0</connid.version>
         <polygon.rest.version>1.5.2.0</polygon.rest.version>
-        <keycloak.version>26.1.0</keycloak.version>
         <jackson.version>2.17.2</jackson.version>
         <connectorPackage>net.flowbridge.connector.keycloak</connectorPackage>
     </properties>
@@ -50,14 +49,7 @@
             <version>${polygon.rest.version}</version>
         </dependency>
 
-        <!-- Keycloak Admin Client -->
-        <dependency>
-            <groupId>org.keycloak</groupId>
-            <artifactId>keycloak-admin-client</artifactId>
-            <version>${keycloak.version}</version>
-        </dependency>
-
-        <!-- Jackson for JSON processing (used by keycloak-admin-client) -->
+        <!-- Jackson for JSON processing -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>

@@ -208,42 +208,33 @@ public class KeycloakClientOperations {
 
         String clientIdValue = null;
         for (Attribute attr : attributes) {
-            switch (attr.getName()) {
-                case Name.NAME:
-                    clientIdValue = AttributeUtil.getStringValue(attr);
-                    clientRep.put("clientId", clientIdValue);
-                    break;
-                case OperationalAttributes.ENABLE_NAME:
-                    clientRep.put("enabled", AttributeUtil.getBooleanValue(attr));
-                    break;
-                case KeycloakClientConnector.ATTR_SERVICE_ACCOUNTS_ENABLED:
-                    clientRep.put("serviceAccountsEnabled", AttributeUtil.getBooleanValue(attr));
-                    break;
-                case KeycloakClientConnector.ATTR_DESCRIPTION:
-                    clientRep.put("description", AttributeUtil.getStringValue(attr));
-                    break;
-                case KeycloakClientConnector.ATTR_CLIENT_NAME:
-                    clientRep.put("name", AttributeUtil.getStringValue(attr));
-                    break;
-                case KeycloakClientConnector.ATTR_DEFAULT_SCOPES:
-                    ArrayNode defaultScopes = mapper.createArrayNode();
-                    attr.getValue().forEach(v -> defaultScopes.add(v.toString()));
-                    clientRep.set("defaultClientScopes", defaultScopes);
-                    break;
-                case KeycloakClientConnector.ATTR_OPTIONAL_SCOPES:
-                    ArrayNode optScopes = mapper.createArrayNode();
-                    attr.getValue().forEach(v -> optScopes.add(v.toString()));
-                    clientRep.set("optionalClientScopes", optScopes);
-                    break;
-                case KeycloakClientConnector.ATTR_AGENT_MAILBOX:
-                case KeycloakClientConnector.ATTR_AGENT_CLASS:
-                    // Store as client attributes
-                    if (!clientRep.has("attributes")) {
-                        clientRep.set("attributes", mapper.createObjectNode());
-                    }
-                    ((ObjectNode) clientRep.get("attributes"))
-                            .put(attr.getName(), AttributeUtil.getStringValue(attr));
-                    break;
+            String name = attr.getName();
+            if (Name.NAME.equals(name)) {
+                clientIdValue = AttributeUtil.getStringValue(attr);
+                clientRep.put("clientId", clientIdValue);
+            } else if (OperationalAttributes.ENABLE_NAME.equals(name)) {
+                clientRep.put("enabled", AttributeUtil.getBooleanValue(attr));
+            } else if (KeycloakClientConnector.ATTR_SERVICE_ACCOUNTS_ENABLED.equals(name)) {
+                clientRep.put("serviceAccountsEnabled", AttributeUtil.getBooleanValue(attr));
+            } else if (KeycloakClientConnector.ATTR_DESCRIPTION.equals(name)) {
+                clientRep.put("description", AttributeUtil.getStringValue(attr));
+            } else if (KeycloakClientConnector.ATTR_CLIENT_NAME.equals(name)) {
+                clientRep.put("name", AttributeUtil.getStringValue(attr));
+            } else if (KeycloakClientConnector.ATTR_DEFAULT_SCOPES.equals(name)) {
+                ArrayNode defaultScopes = mapper.createArrayNode();
+                attr.getValue().forEach(v -> defaultScopes.add(v.toString()));
+                clientRep.set("defaultClientScopes", defaultScopes);
+            } else if (KeycloakClientConnector.ATTR_OPTIONAL_SCOPES.equals(name)) {
+                ArrayNode optScopes = mapper.createArrayNode();
+                attr.getValue().forEach(v -> optScopes.add(v.toString()));
+                clientRep.set("optionalClientScopes", optScopes);
+            } else if (KeycloakClientConnector.ATTR_AGENT_MAILBOX.equals(name)
+                    || KeycloakClientConnector.ATTR_AGENT_CLASS.equals(name)) {
+                if (!clientRep.has("attributes")) {
+                    clientRep.set("attributes", mapper.createObjectNode());
+                }
+                ((ObjectNode) clientRep.get("attributes"))
+                        .put(name, AttributeUtil.getStringValue(attr));
             }
         }
 
@@ -278,41 +269,29 @@ public class KeycloakClientOperations {
 
         ObjectNode updated = (ObjectNode) existing;
         for (AttributeDelta delta : modifications) {
-            switch (delta.getName()) {
-                case OperationalAttributes.ENABLE_NAME:
-                    if (delta.getValuesToReplace() != null && !delta.getValuesToReplace().isEmpty()) {
-                        updated.put("enabled", (Boolean) delta.getValuesToReplace().get(0));
-                    }
-                    break;
-                case KeycloakClientConnector.ATTR_DEFAULT_SCOPES:
-                    if (delta.getValuesToReplace() != null) {
-                        ArrayNode scopes = mapper.createArrayNode();
-                        delta.getValuesToReplace().forEach(v -> scopes.add(v.toString()));
-                        updated.set("defaultClientScopes", scopes);
-                    }
-                    break;
-                case KeycloakClientConnector.ATTR_OPTIONAL_SCOPES:
-                    if (delta.getValuesToReplace() != null) {
-                        ArrayNode scopes = mapper.createArrayNode();
-                        delta.getValuesToReplace().forEach(v -> scopes.add(v.toString()));
-                        updated.set("optionalClientScopes", scopes);
-                    }
-                    break;
-                case KeycloakClientConnector.ATTR_DESCRIPTION:
-                    if (delta.getValuesToReplace() != null && !delta.getValuesToReplace().isEmpty()) {
-                        updated.put("description", delta.getValuesToReplace().get(0).toString());
-                    }
-                    break;
-                case KeycloakClientConnector.ATTR_AGENT_MAILBOX:
-                case KeycloakClientConnector.ATTR_AGENT_CLASS:
-                    if (delta.getValuesToReplace() != null && !delta.getValuesToReplace().isEmpty()) {
-                        ObjectNode attrs = updated.has("attributes")
-                                ? (ObjectNode) updated.get("attributes")
-                                : mapper.createObjectNode();
-                        attrs.put(delta.getName(), delta.getValuesToReplace().get(0).toString());
-                        updated.set("attributes", attrs);
-                    }
-                    break;
+            String name = delta.getName();
+            List<?> values = delta.getValuesToReplace();
+            if (values == null || values.isEmpty()) continue;
+
+            if (OperationalAttributes.ENABLE_NAME.equals(name)) {
+                updated.put("enabled", (Boolean) values.get(0));
+            } else if (KeycloakClientConnector.ATTR_DEFAULT_SCOPES.equals(name)) {
+                ArrayNode scopes = mapper.createArrayNode();
+                values.forEach(v -> scopes.add(v.toString()));
+                updated.set("defaultClientScopes", scopes);
+            } else if (KeycloakClientConnector.ATTR_OPTIONAL_SCOPES.equals(name)) {
+                ArrayNode scopes = mapper.createArrayNode();
+                values.forEach(v -> scopes.add(v.toString()));
+                updated.set("optionalClientScopes", scopes);
+            } else if (KeycloakClientConnector.ATTR_DESCRIPTION.equals(name)) {
+                updated.put("description", values.get(0).toString());
+            } else if (KeycloakClientConnector.ATTR_AGENT_MAILBOX.equals(name)
+                    || KeycloakClientConnector.ATTR_AGENT_CLASS.equals(name)) {
+                ObjectNode attrs = updated.has("attributes")
+                        ? (ObjectNode) updated.get("attributes")
+                        : mapper.createObjectNode();
+                attrs.put(name, values.get(0).toString());
+                updated.set("attributes", attrs);
             }
         }
 

@@ -130,15 +130,6 @@ public class KeycloakClientConnector
     }
 
     @Override
-    public Set<AttributeDelta> updateDelta(ObjectClass objectClass, Uid uid,
-                                           Set<AttributeDelta> modifications,
-                                           OperationOptions options) {
-        validateObjectClass(objectClass);
-        LOG.info("Updating Keycloak client: {0}", uid.getUidValue());
-        return operations.updateClient(uid, modifications);
-    }
-
-    @Override
     public Uid update(ObjectClass objectClass, Uid uid, Set<Attribute> replaceAttributes,
                       OperationOptions options) {
         validateObjectClass(objectClass);
