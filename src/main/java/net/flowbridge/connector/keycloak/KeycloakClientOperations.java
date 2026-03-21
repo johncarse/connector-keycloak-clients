@@ -8,6 +8,8 @@ import org.identityconnectors.framework.common.exceptions.ConnectorException;
 import org.identityconnectors.framework.common.exceptions.UnknownUidException;
 import org.identityconnectors.framework.common.objects.*;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -16,8 +18,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.SecureRandom;
 import java.util.*;
@@ -77,24 +77,29 @@ public class KeycloakClientOperations {
             } else {
                 // Load system CA certificates explicitly (ConnId classloader doesn't inherit them)
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                KeyStore trustStore = null;
-                String javaHome = System.getenv("JAVA_HOME");
-                List<String> candidates = new ArrayList<>();
-                candidates.add(System.getProperty("javax.net.ssl.trustStore"));
-                if (javaHome != null && !javaHome.isEmpty()) {
-                    candidates.add(javaHome + "/lib/security/cacerts");
-                }
-                candidates.add("/etc/ssl/certs/java/cacerts");
-                candidates.add("/etc/default/cacerts");
-                candidates.add("/etc/pki/java/cacerts");
+                KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+                String[] candidates = {
+                        System.getProperty("javax.net.ssl.trustStore"),
+                        "/etc/ssl/certs/java/cacerts",
+                        "/etc/default/cacerts",
+                        "/etc/pki/java/cacerts"
+                };
+                boolean loaded = false;
                 for (String path : candidates) {
-                    if (path != null && !path.isEmpty() && Files.exists(Path.of(path))) {
-                        trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
-                        try (InputStream is = Files.newInputStream(Path.of(path))) {
+                    if (path == null || path.isEmpty()) continue;
+                    File f = new File(path);
+                    if (f.exists() && f.canRead()) {
+                        try (InputStream is = new FileInputStream(f)) {
                             trustStore.load(is, "changeit".toCharArray());
+                            LOG.info("Loaded CA trust store from: {0}", path);
+                            loaded = true;
+                            break;
                         }
-                        break;
                     }
+                }
+                if (!loaded) {
+                    LOG.warn("No CA trust store found, SSL connections may fail");
+                    trustStore.load(null, null);
                 }
                 tmf.init(trustStore);
                 sslContext = SSLContext.getInstance("TLS");
