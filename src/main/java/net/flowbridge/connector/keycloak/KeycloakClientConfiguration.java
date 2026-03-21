@@ -16,8 +16,8 @@ public class KeycloakClientConfiguration extends AbstractRestConfiguration {
     private String tokenEndpoint;
 
     @ConfigurationProperty(
-            displayMessageKey = "keycloak.realm",
-            helpMessageKey = "keycloak.realm.help",
+            displayMessageKey = "realm.display",
+            helpMessageKey = "realm.help",
             order = 10,
             required = true
     )
@@ -30,8 +30,8 @@ public class KeycloakClientConfiguration extends AbstractRestConfiguration {
     }
 
     @ConfigurationProperty(
-            displayMessageKey = "keycloak.adminRealm",
-            helpMessageKey = "keycloak.adminRealm.help",
+            displayMessageKey = "adminRealm.display",
+            helpMessageKey = "adminRealm.help",
             order = 11
     )
     public String getAdminRealm() {
@@ -43,8 +43,8 @@ public class KeycloakClientConfiguration extends AbstractRestConfiguration {
     }
 
     @ConfigurationProperty(
-            displayMessageKey = "keycloak.clientId",
-            helpMessageKey = "keycloak.clientId.help",
+            displayMessageKey = "clientId.display",
+            helpMessageKey = "clientId.help",
             order = 12,
             required = true
     )
@@ -57,8 +57,8 @@ public class KeycloakClientConfiguration extends AbstractRestConfiguration {
     }
 
     @ConfigurationProperty(
-            displayMessageKey = "keycloak.tokenEndpoint",
-            helpMessageKey = "keycloak.tokenEndpoint.help",
+            displayMessageKey = "tokenEndpoint.display",
+            helpMessageKey = "tokenEndpoint.help",
             order = 13
     )
     public String getTokenEndpoint() {
