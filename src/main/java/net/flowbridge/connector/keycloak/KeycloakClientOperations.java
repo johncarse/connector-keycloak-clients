@@ -77,7 +77,7 @@ public class KeycloakClientOperations {
             } else {
                 // Load system CA certificates explicitly (ConnId classloader doesn't inherit them)
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+                KeyStore trustStore = null;
                 String[] candidates = {
                         System.getProperty("javax.net.ssl.trustStore"),
                         "/etc/ssl/certs/java/cacerts",
@@ -89,16 +89,26 @@ public class KeycloakClientOperations {
                     if (path == null || path.isEmpty()) continue;
                     File f = new File(path);
                     if (f.exists() && f.canRead()) {
-                        try (InputStream is = new FileInputStream(f)) {
-                            trustStore.load(is, "changeit".toCharArray());
-                            LOG.info("Loaded CA trust store from: {0}", path);
-                            loaded = true;
-                            break;
+                        // Try PKCS12 first (modern JDK default), fall back to JKS
+                        for (String storeType : new String[]{"PKCS12", "JKS"}) {
+                            try {
+                                trustStore = KeyStore.getInstance(storeType);
+                                try (InputStream is = new FileInputStream(f)) {
+                                    trustStore.load(is, "changeit".toCharArray());
+                                }
+                                LOG.info("Loaded CA trust store from {0} (type={1})", path, storeType);
+                                loaded = true;
+                                break;
+                            } catch (Exception e) {
+                                LOG.info("Failed to load {0} as {1}: {2}", path, storeType, e.getMessage());
+                            }
                         }
+                        if (loaded) break;
                     }
                 }
                 if (!loaded) {
                     LOG.warn("No CA trust store found, SSL connections may fail");
+                    trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
                     trustStore.load(null, null);
                 }
                 tmf.init(trustStore);
