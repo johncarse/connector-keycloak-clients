@@ -79,9 +79,9 @@
                             <ConnectorBundle-Version>${project.version}</ConnectorBundle-Version>
                         </manifestEntries>
                     </archive>
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
+                    <descriptors>
+                        <descriptor>src/main/assembly/connector-bundle.xml</descriptor>
+                    </descriptors>
                 </configuration>
                 <executions>
                     <execution>
