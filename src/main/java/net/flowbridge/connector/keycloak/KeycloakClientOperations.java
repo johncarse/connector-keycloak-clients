@@ -219,8 +219,20 @@ public class KeycloakClientOperations {
             if (response.statusCode() == 201) {
                 // Extract UUID from Location header
                 String location = response.headers().firstValue("Location").orElse("");
+                if (location.isEmpty()) {
+                    // Try lowercase (HTTP/2 normalizes headers)
+                    location = response.headers().firstValue("location").orElse("");
+                }
+                LOG.info("POST {0} → 201, Location: {1}", path, location);
+                if (location.isEmpty()) {
+                    LOG.warn("No Location header in 201 response. Headers: {0}", response.headers().map());
+                    // Fallback: search for the client by clientId
+                    return "";
+                }
                 return location.substring(location.lastIndexOf('/') + 1);
             }
+            LOG.info("POST {0} → {1}, body: {2}", path,
+                    response.statusCode(), response.body().substring(0, Math.min(200, response.body().length())));
             if (response.statusCode() >= 400) {
                 throw new ConnectorException("Keycloak API error: HTTP "
                         + response.statusCode() + " on POST " + path + ": " + response.body());
@@ -321,6 +333,17 @@ public class KeycloakClientOperations {
 
         try {
             String uuid = apiPost("/clients", mapper.writeValueAsString(clientRep));
+            // Fallback: if Location header was missing, look up the client by clientId
+            if (uuid == null || uuid.isEmpty()) {
+                LOG.info("No UUID from Location header, looking up client {0}", clientIdValue);
+                JsonNode clients = apiGet("/clients?clientId=" + URLEncoder.encode(clientIdValue, StandardCharsets.UTF_8));
+                if (clients != null && clients.isArray() && clients.size() > 0) {
+                    uuid = clients.get(0).get("id").asText();
+                    LOG.info("Found client {0} with UUID {1}", clientIdValue, uuid);
+                } else {
+                    throw new ConnectorException("Created client but could not find it: " + clientIdValue);
+                }
+            }
             LOG.info("Created Keycloak client {0} with UUID {1}", clientIdValue, uuid);
             return new Uid(uuid);
         } catch (IOException e) {
