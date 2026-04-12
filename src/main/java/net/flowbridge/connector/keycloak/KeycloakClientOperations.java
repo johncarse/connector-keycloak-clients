@@ -24,28 +24,39 @@ import java.util.*;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * Implements CRUD operations against the Keycloak Admin REST API for OAuth clients.
- * <p>
- * API reference: https://www.keycloak.org/docs-api/latest/rest-api/index.html
+ * Implements CRUD operations against the Keycloak Admin REST API for OAuth clients
+ * and host connectors, including service account user attribute management.
  * <p>
  * Endpoints used:
- *   GET    /admin/realms/{realm}/clients?clientId={clientId}
- *   GET    /admin/realms/{realm}/clients/{id}
- *   POST   /admin/realms/{realm}/clients
- *   PUT    /admin/realms/{realm}/clients/{id}
- *   DELETE /admin/realms/{realm}/clients/{id}
- *   GET    /admin/realms/{realm}/clients/{id}/client-secret
+ *   GET/POST/PUT/DELETE  /admin/realms/{realm}/clients[/{id}]
+ *   GET                  /admin/realms/{realm}/clients/{id}/service-account-user
+ *   PUT                  /admin/realms/{realm}/users/{userId}
+ *   GET                  /admin/realms/{realm}/clients/{id}/client-secret
  */
 public class KeycloakClientOperations {
 
     private static final Log LOG = Log.getLog(KeycloakClientOperations.class);
+
+    // Service account user attributes that map to JWT claims
+    private static final Set<String> SA_USER_ATTRS = Set.of(
+            KeycloakClientConnector.ATTR_ORG_ID,
+            KeycloakClientConnector.ATTR_AGENT_IDENTITY,
+            KeycloakClientConnector.ATTR_HOST_ID,
+            KeycloakClientConnector.ATTR_GROUP_ID,
+            KeycloakClientConnector.ATTR_FRIENDLY_NAME
+    );
+
+    // Client-level attributes (stored in client.attributes, not SA user)
+    private static final Set<String> CLIENT_ATTRS = Set.of(
+            KeycloakClientConnector.ATTR_AGENT_MAILBOX,
+            KeycloakClientConnector.ATTR_AGENT_CLASS
+    );
 
     private final KeycloakClientConfiguration config;
     private final AbstractRestConnector<?> connector;
@@ -62,6 +73,8 @@ public class KeycloakClientOperations {
         this.httpClient = createHttpClient(config);
     }
 
+    // ---- SSL / HTTP Client ----
+
     private static HttpClient createHttpClient(KeycloakClientConfiguration config) {
         try {
             SSLContext sslContext;
@@ -75,7 +88,6 @@ public class KeycloakClientOperations {
                         }
                 }, new SecureRandom());
             } else {
-                // Load system CA certificates explicitly (ConnId classloader doesn't inherit them)
                 TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
                 KeyStore trustStore = null;
                 String[] candidates = {
@@ -89,25 +101,20 @@ public class KeycloakClientOperations {
                     if (path == null || path.isEmpty()) continue;
                     File f = new File(path);
                     if (f.exists() && f.canRead()) {
-                        // Try PKCS12 first (modern JDK default), fall back to JKS
                         for (String storeType : new String[]{"PKCS12", "JKS"}) {
                             try {
                                 trustStore = KeyStore.getInstance(storeType);
                                 try (InputStream is = new FileInputStream(f)) {
                                     trustStore.load(is, "changeit".toCharArray());
                                 }
-                                LOG.info("Loaded CA trust store from {0} (type={1})", path, storeType);
                                 loaded = true;
                                 break;
-                            } catch (Exception e) {
-                                LOG.info("Failed to load {0} as {1}: {2}", path, storeType, e.getMessage());
-                            }
+                            } catch (Exception ignored) {}
                         }
                         if (loaded) break;
                     }
                 }
                 if (!loaded) {
-                    LOG.warn("No CA trust store found, SSL connections may fail");
                     trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
                     trustStore.load(null, null);
                 }
@@ -134,8 +141,6 @@ public class KeycloakClientOperations {
         StringBuilder body = new StringBuilder();
         body.append("grant_type=client_credentials");
         body.append("&client_id=").append(URLEncoder.encode(config.getClientId(), StandardCharsets.UTF_8));
-
-        // Extract password from GuardedString
         final StringBuilder secret = new StringBuilder();
         config.getPassword().access(chars -> secret.append(new String(chars)));
         body.append("&client_secret=").append(URLEncoder.encode(secret.toString(), StandardCharsets.UTF_8));
@@ -146,9 +151,7 @@ public class KeycloakClientOperations {
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                     .build();
-
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() != 200) {
                 throw new ConnectorException("Failed to obtain access token: HTTP "
@@ -159,10 +162,7 @@ public class KeycloakClientOperations {
             cachedAccessToken = tokenResponse.get("access_token").asText();
             int expiresIn = tokenResponse.get("expires_in").asInt(300);
             tokenExpiresAt = (System.currentTimeMillis() / 1000) + expiresIn;
-
-            LOG.info("Obtained Keycloak access token, expires in {0}s", expiresIn);
             return cachedAccessToken;
-
         } catch (IOException | InterruptedException e) {
             throw new ConnectorException("Failed to obtain access token", e);
         }
@@ -172,7 +172,6 @@ public class KeycloakClientOperations {
 
     private String adminBaseUrl() {
         String addr = config.getServiceAddress();
-        // Ensure it ends with /admin/realms/{realm}
         if (!addr.contains("/admin/realms/")) {
             addr = addr + "/admin/realms/" + config.getRealm();
         }
@@ -188,103 +187,135 @@ public class KeycloakClientOperations {
 
     private JsonNode apiGet(String path) {
         try {
-            HttpRequest request = apiRequest(path).GET().build();
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 404) {
-                return null;
-            }
-            if (response.statusCode() >= 400) {
-                throw new ConnectorException("Keycloak API error: HTTP "
-                        + response.statusCode() + " on GET " + path + ": " + response.body());
-            }
+            HttpResponse<String> response = httpClient.send(
+                    apiRequest(path).GET().build(), HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 404) return null;
+            if (response.statusCode() >= 400)
+                throw new ConnectorException("Keycloak GET " + path + " → " + response.statusCode() + ": " + response.body());
             return mapper.readTree(response.body());
         } catch (IOException | InterruptedException e) {
-            throw new ConnectorException("Keycloak API request failed: GET " + path, e);
+            throw new ConnectorException("Keycloak GET " + path + " failed", e);
         }
     }
 
     private String apiPost(String path, String jsonBody) {
         try {
-            HttpRequest request = apiRequest(path)
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request,
+            HttpResponse<String> response = httpClient.send(
+                    apiRequest(path).POST(HttpRequest.BodyPublishers.ofString(jsonBody)).build(),
                     HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 409) {
-                throw new AlreadyExistsException("Client already exists");
-            }
+            if (response.statusCode() == 409) throw new AlreadyExistsException("Client already exists");
             if (response.statusCode() == 201) {
-                // Extract UUID from Location header
-                String location = response.headers().firstValue("Location").orElse("");
-                if (location.isEmpty()) {
-                    // Try lowercase (HTTP/2 normalizes headers)
-                    location = response.headers().firstValue("location").orElse("");
-                }
-                LOG.info("POST {0} → 201, Location: {1}", path, location);
-                if (location.isEmpty()) {
-                    LOG.warn("No Location header in 201 response. Headers: {0}", response.headers().map());
-                    // Fallback: search for the client by clientId
-                    return "";
-                }
-                return location.substring(location.lastIndexOf('/') + 1);
+                String location = response.headers().firstValue("Location")
+                        .or(() -> response.headers().firstValue("location")).orElse("");
+                if (!location.isEmpty()) return location.substring(location.lastIndexOf('/') + 1);
+                return "";
             }
-            LOG.info("POST {0} → {1}, body: {2}", path,
-                    response.statusCode(), response.body().substring(0, Math.min(200, response.body().length())));
-            if (response.statusCode() >= 400) {
-                throw new ConnectorException("Keycloak API error: HTTP "
-                        + response.statusCode() + " on POST " + path + ": " + response.body());
-            }
+            if (response.statusCode() >= 400)
+                throw new ConnectorException("Keycloak POST " + path + " → " + response.statusCode() + ": " + response.body());
             return response.body();
         } catch (IOException | InterruptedException e) {
-            throw new ConnectorException("Keycloak API request failed: POST " + path, e);
+            throw new ConnectorException("Keycloak POST " + path + " failed", e);
         }
     }
 
     private void apiPut(String path, String jsonBody) {
         try {
-            HttpRequest request = apiRequest(path)
-                    .PUT(HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request,
+            HttpResponse<String> response = httpClient.send(
+                    apiRequest(path).PUT(HttpRequest.BodyPublishers.ofString(jsonBody)).build(),
                     HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 404) {
-                throw new UnknownUidException("Client not found");
-            }
-            if (response.statusCode() >= 400) {
-                throw new ConnectorException("Keycloak API error: HTTP "
-                        + response.statusCode() + " on PUT " + path + ": " + response.body());
-            }
+            if (response.statusCode() == 404) throw new UnknownUidException("Not found: " + path);
+            if (response.statusCode() >= 400)
+                throw new ConnectorException("Keycloak PUT " + path + " → " + response.statusCode() + ": " + response.body());
         } catch (IOException | InterruptedException e) {
-            throw new ConnectorException("Keycloak API request failed: PUT " + path, e);
+            throw new ConnectorException("Keycloak PUT " + path + " failed", e);
         }
     }
 
     private void apiDelete(String path) {
         try {
-            HttpRequest request = apiRequest(path).DELETE().build();
-            HttpResponse<String> response = httpClient.send(request,
-                    HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 404) {
-                throw new UnknownUidException("Client not found");
-            }
-            if (response.statusCode() >= 400) {
-                throw new ConnectorException("Keycloak API error: HTTP "
-                        + response.statusCode() + " on DELETE " + path + ": " + response.body());
-            }
+            HttpResponse<String> response = httpClient.send(
+                    apiRequest(path).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 404) throw new UnknownUidException("Not found: " + path);
+            if (response.statusCode() >= 400)
+                throw new ConnectorException("Keycloak DELETE " + path + " → " + response.statusCode() + ": " + response.body());
         } catch (IOException | InterruptedException e) {
-            throw new ConnectorException("Keycloak API request failed: DELETE " + path, e);
+            throw new ConnectorException("Keycloak DELETE " + path + " failed", e);
         }
+    }
+
+    // ---- Service Account User Attributes ----
+
+    /**
+     * Set attributes on the service account user for a client.
+     * These are read by protocol mappers to populate JWT claims (org_id, host_id, agent_identity).
+     */
+    private void setServiceAccountAttributes(String clientUuid, Map<String, String> attrs) {
+        if (attrs.isEmpty()) return;
+
+        // Get the service account user
+        JsonNode saUser = apiGet("/clients/" + clientUuid + "/service-account-user");
+        if (saUser == null) {
+            LOG.warn("No service account user for client {0}", clientUuid);
+            return;
+        }
+        String userId = saUser.get("id").asText();
+
+        // Build attributes map (Keycloak expects arrays of strings)
+        ObjectNode userUpdate = mapper.createObjectNode();
+        ObjectNode attrsNode = mapper.createObjectNode();
+        for (Map.Entry<String, String> entry : attrs.entrySet()) {
+            ArrayNode arr = mapper.createArrayNode();
+            arr.add(entry.getValue());
+            attrsNode.set(entry.getKey(), arr);
+        }
+        userUpdate.set("attributes", attrsNode);
+
+        try {
+            apiPut("/users/" + userId, mapper.writeValueAsString(userUpdate));
+            LOG.info("Set service account attributes for client {0}: {1}", clientUuid, attrs.keySet());
+        } catch (IOException e) {
+            throw new ConnectorException("Failed to serialize SA user attributes", e);
+        }
+    }
+
+    /**
+     * Read service account user attributes for a client.
+     */
+    private Map<String, String> getServiceAccountAttributes(String clientUuid) {
+        JsonNode saUser = apiGet("/clients/" + clientUuid + "/service-account-user");
+        if (saUser == null) return Collections.emptyMap();
+
+        Map<String, String> result = new HashMap<>();
+        JsonNode attrs = saUser.path("attributes");
+        if (attrs.isObject()) {
+            for (String key : SA_USER_ATTRS) {
+                JsonNode val = attrs.get(key);
+                if (val != null && val.isArray() && val.size() > 0) {
+                    result.put(key, val.get(0).asText());
+                }
+            }
+        }
+        return result;
+    }
+
+    // ---- Extract Attributes from ConnId Set ----
+
+    private static String getStringAttr(Set<Attribute> attributes, String name) {
+        for (Attribute attr : attributes) {
+            if (name.equals(attr.getName())) return AttributeUtil.getStringValue(attr);
+        }
+        return null;
     }
 
     // ---- CRUD Operations ----
 
-    public Uid createClient(Set<Attribute> attributes) {
+    /**
+     * Create a Keycloak client (agent or host).
+     * @param isHost true for HostConnector, false for OAuthClient
+     */
+    public Uid createClient(Set<Attribute> attributes, boolean isHost) {
         ObjectNode clientRep = mapper.createObjectNode();
+        Map<String, String> saAttrs = new HashMap<>();
 
         String clientIdValue = null;
         for (Attribute attr : attributes) {
@@ -301,15 +332,19 @@ public class KeycloakClientOperations {
             } else if (KeycloakClientConnector.ATTR_CLIENT_NAME.equals(name)) {
                 clientRep.put("name", AttributeUtil.getStringValue(attr));
             } else if (KeycloakClientConnector.ATTR_DEFAULT_SCOPES.equals(name)) {
-                ArrayNode defaultScopes = mapper.createArrayNode();
-                attr.getValue().forEach(v -> defaultScopes.add(v.toString()));
-                clientRep.set("defaultClientScopes", defaultScopes);
+                ArrayNode scopes = mapper.createArrayNode();
+                attr.getValue().forEach(v -> scopes.add(v.toString()));
+                clientRep.set("defaultClientScopes", scopes);
             } else if (KeycloakClientConnector.ATTR_OPTIONAL_SCOPES.equals(name)) {
-                ArrayNode optScopes = mapper.createArrayNode();
-                attr.getValue().forEach(v -> optScopes.add(v.toString()));
-                clientRep.set("optionalClientScopes", optScopes);
-            } else if (KeycloakClientConnector.ATTR_AGENT_MAILBOX.equals(name)
-                    || KeycloakClientConnector.ATTR_AGENT_CLASS.equals(name)) {
+                ArrayNode scopes = mapper.createArrayNode();
+                attr.getValue().forEach(v -> scopes.add(v.toString()));
+                clientRep.set("optionalClientScopes", scopes);
+            } else if (SA_USER_ATTRS.contains(name)) {
+                // Service account user attributes → set after client creation
+                String val = AttributeUtil.getStringValue(attr);
+                if (val != null) saAttrs.put(name, val);
+            } else if (CLIENT_ATTRS.contains(name)) {
+                // Client-level attributes
                 if (!clientRep.has("attributes")) {
                     clientRep.set("attributes", mapper.createObjectNode());
                 }
@@ -318,70 +353,88 @@ public class KeycloakClientOperations {
             }
         }
 
-        // Defaults for agent clients
-        if (!clientRep.has("serviceAccountsEnabled")) {
-            clientRep.put("serviceAccountsEnabled", true);
+        // Generate UUID clientId if not provided
+        if (clientIdValue == null || clientIdValue.isEmpty()) {
+            clientIdValue = UUID.randomUUID().toString();
+            clientRep.put("clientId", clientIdValue);
         }
-        if (!clientRep.has("enabled")) {
-            clientRep.put("enabled", true);
-        }
-        // Client credentials only
+
+        // Defaults
+        if (!clientRep.has("serviceAccountsEnabled")) clientRep.put("serviceAccountsEnabled", true);
+        if (!clientRep.has("enabled")) clientRep.put("enabled", true);
         clientRep.put("standardFlowEnabled", false);
         clientRep.put("implicitFlowEnabled", false);
         clientRep.put("directAccessGrantsEnabled", false);
         clientRep.put("clientAuthenticatorType", "client-secret");
 
+        // Default scopes based on type
+        if (!clientRep.has("defaultClientScopes")) {
+            ArrayNode scopes = mapper.createArrayNode();
+            if (isHost) {
+                scopes.add("relay:host");
+            } else {
+                scopes.add("relay:connect");
+                scopes.add("jmap:read");
+                scopes.add("jmap:send");
+            }
+            clientRep.set("defaultClientScopes", scopes);
+        }
+
         try {
             String uuid = apiPost("/clients", mapper.writeValueAsString(clientRep));
-            // Fallback: if Location header was missing, look up the client by clientId
+            // Fallback: look up by clientId if Location header missing
             if (uuid == null || uuid.isEmpty()) {
-                LOG.info("No UUID from Location header, looking up client {0}", clientIdValue);
                 JsonNode clients = apiGet("/clients?clientId=" + URLEncoder.encode(clientIdValue, StandardCharsets.UTF_8));
                 if (clients != null && clients.isArray() && clients.size() > 0) {
                     uuid = clients.get(0).get("id").asText();
-                    LOG.info("Found client {0} with UUID {1}", clientIdValue, uuid);
                 } else {
                     throw new ConnectorException("Created client but could not find it: " + clientIdValue);
                 }
             }
-            LOG.info("Created Keycloak client {0} with UUID {1}", clientIdValue, uuid);
+
+            // Set service account user attributes
+            if (!saAttrs.isEmpty()) {
+                setServiceAccountAttributes(uuid, saAttrs);
+            }
+
+            LOG.info("Created {0} client {1} (UUID {2})", isHost ? "host" : "agent", clientIdValue, uuid);
             return new Uid(uuid);
         } catch (IOException e) {
-            throw new ConnectorException("Failed to serialize client representation", e);
+            throw new ConnectorException("Failed to serialize client", e);
         }
     }
 
-    public Set<AttributeDelta> updateClient(Uid uid, Set<AttributeDelta> modifications) {
-        // Get current state
+    public Uid replaceClient(Uid uid, Set<Attribute> replaceAttributes, boolean isHost) {
         JsonNode existing = apiGet("/clients/" + uid.getUidValue());
-        if (existing == null) {
-            throw new UnknownUidException(uid.getUidValue());
-        }
+        if (existing == null) throw new UnknownUidException(uid.getUidValue());
 
         ObjectNode updated = (ObjectNode) existing;
-        for (AttributeDelta delta : modifications) {
-            String name = delta.getName();
-            List<?> values = delta.getValuesToReplace();
-            if (values == null || values.isEmpty()) continue;
+        Map<String, String> saAttrs = new HashMap<>();
+
+        for (Attribute attr : replaceAttributes) {
+            String name = attr.getName();
+            String val = AttributeUtil.getStringValue(attr);
 
             if (OperationalAttributes.ENABLE_NAME.equals(name)) {
-                updated.put("enabled", (Boolean) values.get(0));
+                updated.put("enabled", AttributeUtil.getBooleanValue(attr));
             } else if (KeycloakClientConnector.ATTR_DEFAULT_SCOPES.equals(name)) {
                 ArrayNode scopes = mapper.createArrayNode();
-                values.forEach(v -> scopes.add(v.toString()));
+                attr.getValue().forEach(v -> scopes.add(v.toString()));
                 updated.set("defaultClientScopes", scopes);
             } else if (KeycloakClientConnector.ATTR_OPTIONAL_SCOPES.equals(name)) {
                 ArrayNode scopes = mapper.createArrayNode();
-                values.forEach(v -> scopes.add(v.toString()));
+                attr.getValue().forEach(v -> scopes.add(v.toString()));
                 updated.set("optionalClientScopes", scopes);
             } else if (KeycloakClientConnector.ATTR_DESCRIPTION.equals(name)) {
-                updated.put("description", values.get(0).toString());
-            } else if (KeycloakClientConnector.ATTR_AGENT_MAILBOX.equals(name)
-                    || KeycloakClientConnector.ATTR_AGENT_CLASS.equals(name)) {
+                updated.put("description", val);
+            } else if (KeycloakClientConnector.ATTR_CLIENT_NAME.equals(name)) {
+                updated.put("name", val);
+            } else if (SA_USER_ATTRS.contains(name)) {
+                if (val != null) saAttrs.put(name, val);
+            } else if (CLIENT_ATTRS.contains(name)) {
                 ObjectNode attrs = updated.has("attributes")
-                        ? (ObjectNode) updated.get("attributes")
-                        : mapper.createObjectNode();
-                attrs.put(name, values.get(0).toString());
+                        ? (ObjectNode) updated.get("attributes") : mapper.createObjectNode();
+                attrs.put(name, val);
                 updated.set("attributes", attrs);
             }
         }
@@ -391,15 +444,12 @@ public class KeycloakClientOperations {
         } catch (IOException e) {
             throw new ConnectorException("Failed to serialize client update", e);
         }
-        return Collections.emptySet();
-    }
 
-    public Uid replaceClient(Uid uid, Set<Attribute> replaceAttributes) {
-        Set<AttributeDelta> deltas = new HashSet<>();
-        for (Attribute attr : replaceAttributes) {
-            deltas.add(AttributeDeltaBuilder.build(attr.getName(), attr.getValue()));
+        // Update service account user attributes
+        if (!saAttrs.isEmpty()) {
+            setServiceAccountAttributes(uid.getUidValue(), saAttrs);
         }
-        updateClient(uid, deltas);
+
         return uid;
     }
 
@@ -408,11 +458,11 @@ public class KeycloakClientOperations {
         LOG.info("Deleted Keycloak client {0}", uid.getUidValue());
     }
 
-    public void searchClients(KeycloakClientFilter filter, ResultsHandler handler) {
+    public void searchClients(KeycloakClientFilter filter, ResultsHandler handler, String objectClassType) {
         if (filter != null && filter.getType() == KeycloakClientFilter.FilterType.BY_UID) {
             JsonNode client = apiGet("/clients/" + filter.getValue());
             if (client != null) {
-                handler.handle(clientToConnectorObject(client));
+                handler.handle(clientToConnectorObject(client, objectClassType));
             }
             return;
         }
@@ -425,55 +475,43 @@ public class KeycloakClientOperations {
         JsonNode clients = apiGet(path);
         if (clients != null && clients.isArray()) {
             for (JsonNode client : clients) {
-                if (!handler.handle(clientToConnectorObject(client))) {
-                    break;
-                }
+                if (!handler.handle(clientToConnectorObject(client, objectClassType))) break;
             }
         }
     }
 
     public void testConnection() {
-        // Attempt to list clients — if auth or connectivity fails, this throws
         JsonNode result = apiGet("/clients?max=1");
-        if (result == null) {
-            throw new ConnectorException("Failed to connect to Keycloak Admin API");
-        }
+        if (result == null) throw new ConnectorException("Failed to connect to Keycloak Admin API");
         LOG.info("Keycloak connection test successful");
     }
 
     // ---- Mapping ----
 
-    private ConnectorObject clientToConnectorObject(JsonNode client) {
+    private ConnectorObject clientToConnectorObject(JsonNode client, String objectClassType) {
         ConnectorObjectBuilder builder = new ConnectorObjectBuilder();
-        builder.setObjectClass(new ObjectClass(KeycloakClientConnector.OBJECT_CLASS_CLIENT));
+        builder.setObjectClass(new ObjectClass(objectClassType));
 
-        builder.setUid(client.get("id").asText());
+        String clientUuid = client.get("id").asText();
+        builder.setUid(clientUuid);
         builder.setName(client.get("clientId").asText());
 
         builder.addAttribute(OperationalAttributes.ENABLE_NAME,
                 client.path("enabled").asBoolean(true));
-
         builder.addAttribute(KeycloakClientConnector.ATTR_SERVICE_ACCOUNTS_ENABLED,
                 client.path("serviceAccountsEnabled").asBoolean(false));
 
-        if (client.has("description") && !client.get("description").isNull()) {
-            builder.addAttribute(KeycloakClientConnector.ATTR_DESCRIPTION,
-                    client.get("description").asText());
-        }
+        if (client.has("description") && !client.get("description").isNull())
+            builder.addAttribute(KeycloakClientConnector.ATTR_DESCRIPTION, client.get("description").asText());
+        if (client.has("name") && !client.get("name").isNull())
+            builder.addAttribute(KeycloakClientConnector.ATTR_CLIENT_NAME, client.get("name").asText());
 
-        if (client.has("name") && !client.get("name").isNull()) {
-            builder.addAttribute(KeycloakClientConnector.ATTR_CLIENT_NAME,
-                    client.get("name").asText());
-        }
-
-        // Default client scopes
+        // Scopes
         if (client.has("defaultClientScopes")) {
             List<String> scopes = new ArrayList<>();
             client.get("defaultClientScopes").forEach(s -> scopes.add(s.asText()));
             builder.addAttribute(KeycloakClientConnector.ATTR_DEFAULT_SCOPES, scopes);
         }
-
-        // Optional client scopes
         if (client.has("optionalClientScopes")) {
             List<String> scopes = new ArrayList<>();
             client.get("optionalClientScopes").forEach(s -> scopes.add(s.asText()));
@@ -483,14 +521,15 @@ public class KeycloakClientOperations {
         // Client attributes
         if (client.has("attributes") && client.get("attributes").isObject()) {
             JsonNode attrs = client.get("attributes");
-            if (attrs.has("agent_mailbox")) {
-                builder.addAttribute(KeycloakClientConnector.ATTR_AGENT_MAILBOX,
-                        attrs.get("agent_mailbox").asText());
+            for (String key : CLIENT_ATTRS) {
+                if (attrs.has(key)) builder.addAttribute(key, attrs.get(key).asText());
             }
-            if (attrs.has("agent_class")) {
-                builder.addAttribute(KeycloakClientConnector.ATTR_AGENT_CLASS,
-                        attrs.get("agent_class").asText());
-            }
+        }
+
+        // Service account user attributes (fetched from SA user entity)
+        Map<String, String> saAttrs = getServiceAccountAttributes(clientUuid);
+        for (Map.Entry<String, String> entry : saAttrs.entrySet()) {
+            builder.addAttribute(entry.getKey(), entry.getValue());
         }
 
         return builder.build();
